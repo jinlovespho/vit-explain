@@ -1,0 +1,1 @@
+python vit_explain.py --image_path ./examples/plane2.png --head_fusion mean --discard_ratio 0.8

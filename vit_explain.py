@@ -58,7 +58,17 @@ if __name__ == '__main__':
     input_tensor = transform(img).unsqueeze(0)
     if args.use_cuda:
         input_tensor = input_tensor.cuda()
+    
+    for block in model.blocks:
+            block.attn.fused_attn = False
 
+    tmp=[]
+    for i in range(12):
+        model.blocks[i].attn.attn_drop.register_forward_hook(lambda m,i,o: tmp.append(o))
+    
+    # tmp[0] = (b,h,n,n) = (1,3,197,197) = attention_map per head
+
+    # breakpoint()
     if args.category_index is None:
         print("Doing Attention Rollout")
         attention_rollout = VITAttentionRollout(model, head_fusion=args.head_fusion, 
@@ -72,6 +82,7 @@ if __name__ == '__main__':
         name = "grad_rollout_{}_{:.3f}_{}.png".format(args.category_index,
             args.discard_ratio, args.head_fusion)
 
+    breakpoint()
 
     np_img = np.array(img)[:, :, ::-1]
     mask = cv2.resize(mask, (np_img.shape[1], np_img.shape[0]))
