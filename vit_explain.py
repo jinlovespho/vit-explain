@@ -1,94 +1,54 @@
-import argparse
 import sys
 import torch
 from PIL import Image
 from torchvision import transforms
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt 
 
 from vit_rollout import VITAttentionRollout
 from vit_grad_rollout import VITAttentionGradRollout
+from util.utils import get_model, get_dataset 
+from util.show_utils import show_mask_on_image
+from args import get_args
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--use_cuda', action='store_true', default=False,
-                        help='Use NVIDIA GPU acceleration')
-    parser.add_argument('--image_path', type=str, default='./examples/both.png',
-                        help='Input image path')
-    parser.add_argument('--head_fusion', type=str, default='max',
-                        help='How to fuse the attention heads for attention rollout. \
-                        Can be mean/max/min')
-    parser.add_argument('--discard_ratio', type=float, default=0.9,
-                        help='How many of the lowest 14x14 attention paths should we discard')
-    parser.add_argument('--category_index', type=int, default=None,
-                        help='The category index for gradient rollout')
-    args = parser.parse_args()
-    args.use_cuda = args.use_cuda and torch.cuda.is_available()
-    if args.use_cuda:
-        print("Using GPU")
-    else:
-        print("Using CPU")
-
-    return args
-
-def show_mask_on_image(img, mask):
-    img = np.float32(img) / 255
-    heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
-    heatmap = np.float32(heatmap) / 255
-    cam = heatmap + np.float32(img)
-    cam = cam / np.max(cam)
-    return np.uint8(255 * cam)
 
 if __name__ == '__main__':
     args = get_args()
-    model = torch.hub.load('facebookresearch/deit:main', 
-        'deit_tiny_patch16_224', pretrained=True)
+
+    # get model
+    model = get_model(args)
     model.eval()
-
-    if args.use_cuda:
-        model = model.cuda()
-
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
-    img = Image.open(args.image_path)
-    img = img.resize((224, 224))
-    input_tensor = transform(img).unsqueeze(0)
-    if args.use_cuda:
-        input_tensor = input_tensor.cuda()
     
-    for block in model.blocks:
-            block.attn.fused_attn = False
-
-    tmp=[]
-    for i in range(12):
-        model.blocks[i].attn.attn_drop.register_forward_hook(lambda m,i,o: tmp.append(o))
+    # get data
+    train_ds, val_ds = get_dataset(args)
+    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=8)
+    val_dl = torch.utils.data.DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=8)
+    train_dl_iter = iter(train_dl)
     
-    # tmp[0] = (b,h,n,n) = (1,3,197,197) = attention_map per head
+    # get data(x) and label(y)
+    x, y = next(train_dl_iter)
+    
+    # GIVEN EXAMPLE
+    # img = Image.open('./examples/plane2.png')
+    # img = img.resize((224,224))
+    # trans = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor() ])
+    # x = trans(img).unsqueeze(dim=0)
+    
+    # get Attention Map
+    attn_rollout = VITAttentionRollout(model, layer_name1='', layer_name2='attn_drop', head_fusion=args.head_fusion, discard_ratio=args.discard_ratio)
+    attn_map = attn_rollout(x)
+    name = f"img_attn_map_{args.head_fusion}_{args.discard_ratio}.png"
+    
+    # PYTORCH fused_attn=True 로 되어있으면 hook 안걸린다 ! 
+    # for block in model.blocks:
+    #         block.attn.fused_attn = False
 
-    # breakpoint()
-    if args.category_index is None:
-        print("Doing Attention Rollout")
-        attention_rollout = VITAttentionRollout(model, head_fusion=args.head_fusion, 
-            discard_ratio=args.discard_ratio)
-        mask = attention_rollout(input_tensor)
-        name = "attention_rollout_{:.3f}_{}.png".format(args.discard_ratio, args.head_fusion)
-    else:
-        print("Doing Gradient Attention Rollout")
-        grad_rollout = VITAttentionGradRollout(model, discard_ratio=args.discard_ratio)
-        mask = grad_rollout(input_tensor, args.category_index)
-        name = "grad_rollout_{}_{:.3f}_{}.png".format(args.category_index,
-            args.discard_ratio, args.head_fusion)
-
-    breakpoint()
-
-    np_img = np.array(img)[:, :, ::-1]
-    mask = cv2.resize(mask, (np_img.shape[1], np_img.shape[0]))
+    # visualize attn map and image
+    np_img = x.squeeze(dim=0).permute(1,2,0).numpy() * 255 
+    np_img = np_img[:,:, [2,1,0] ]
+    mask = cv2.resize(attn_map, (np_img.shape[1], np_img.shape[0])) #(h,w)
     mask = show_mask_on_image(np_img, mask)
-    cv2.imshow("Input Image", np_img)
-    cv2.imshow(name, mask)
-    cv2.imwrite("input.png", np_img)
+    cv2.imwrite("img.png", np_img)
     cv2.imwrite(name, mask)
-    cv2.waitKey(-1)
+    

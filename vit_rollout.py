@@ -7,34 +7,55 @@ import numpy as np
 import cv2
 
 def rollout(attentions, discard_ratio, head_fusion):
-    breakpoint()
-    result = torch.eye(attentions[0].size(-1))
-    with torch.no_grad():
-        for attention in attentions:
-            if head_fusion == "mean":
-                attention_heads_fused = attention.mean(axis=1)
-            elif head_fusion == "max":
-                attention_heads_fused = attention.max(axis=1)[0]
-            elif head_fusion == "min":
-                attention_heads_fused = attention.min(axis=1)[0]
-            else:
-                raise "Attention head fusion type Not supported"
-
-            # Drop the lowest attentions, but
-            # don't drop the class token
-            flat = attention_heads_fused.view(attention_heads_fused.size(0), -1)
-            num_to_discard = int(flat.size(-1)*discard_ratio)
-            _, indices = flat.topk(num_to_discard, -1, False)  # largest=False 이기에 topk 반대로 lowerk feel
-            indices = indices[indices != 0]     # 
-            flat[0, indices] = 0
-            
-
-            I = torch.eye(attention_heads_fused.size(-1))
-            a = (attention_heads_fused + 1.0*I)/2
-            a = a / a.sum(dim=-1)
-
-            result = torch.matmul(a, result)
     
+    # breakpoint()
+    result = torch.eye(attentions[0].size(-1))
+    with torch.no_grad():    
+        
+        # attention heads already fused   
+        if len(attentions[0].shape) == 3:
+            for attention_heads_fused in attentions:
+                # Drop the lowest attentions, but
+                # don't drop the class token
+                flat = attention_heads_fused.view(attention_heads_fused.size(0), -1)
+                num_to_discard = int(flat.size(-1)*discard_ratio)
+                _, indices = flat.topk(num_to_discard, -1, False)  # largest=False 이기에 topk 반대로 lowerk feel
+                indices = indices[indices != 0]     # 
+                flat[0, indices] = 0
+                
+                I = torch.eye(attention_heads_fused.size(-1))
+                a = (attention_heads_fused + 1.0*I)/2
+                a = a / a.sum(dim=-1)
+
+                result = torch.matmul(a, result)
+    
+        # atteniton heads needs to be fused
+        elif len(attentions[0].shape) == 4:   
+            for attention in attentions:
+                if head_fusion == "mean":
+                    attention_heads_fused = attention.mean(axis=1)
+                elif head_fusion == "max":
+                    attention_heads_fused = attention.max(axis=1)[0]
+                elif head_fusion == "min":
+                    attention_heads_fused = attention.min(axis=1)[0]
+                else:
+                    raise "Attention head fusion type Not supported"
+
+                # Drop the lowest attentions, but
+                # don't drop the class token
+                flat = attention_heads_fused.view(attention_heads_fused.size(0), -1)
+                num_to_discard = int(flat.size(-1)*discard_ratio)
+                _, indices = flat.topk(num_to_discard, -1, False)  # largest=False 이기에 topk 반대로 lowerk feel
+                indices = indices[indices != 0]     # 
+                flat[0, indices] = 0
+                
+                I = torch.eye(attention_heads_fused.size(-1))
+                a = (attention_heads_fused + 1.0*I)/2
+                a = a / a.sum(dim=-1)
+
+                result = torch.matmul(a, result)
+    
+    # breakpoint()
     # Look at the total attention between the class token,
     # and the image patches
     mask = result[0, 0 , 1 :]
@@ -45,32 +66,23 @@ def rollout(attentions, discard_ratio, head_fusion):
     return mask    
 
 class VITAttentionRollout:
-    def __init__(self, model, attention_layer_name='attn_drop', head_fusion="mean",
-        discard_ratio=0.9):
+    def __init__(self, model, layer_name1='', layer_name2='', head_fusion="mean", discard_ratio=0.9):
         self.model = model
         self.head_fusion = head_fusion
         self.discard_ratio = discard_ratio
         
-        lst1=[]
-        lst2=[]
+        self.lst1=[]
+        self.lst2=[]
         for name, module in self.model.named_modules():
-            lst1.append(name)
-            if attention_layer_name in name:
-                lst2.append(name)
-                module.register_forward_hook(self.get_attention)
-        
-        lst3=[]
-        for key, value in self.model._modules.items():
-            lst3.append(key)
+            self.lst1.append(name)
+            if layer_name1 in name and layer_name2 in name:
+                self.lst2.append(name)
+                module.register_forward_hook(lambda m,i,o: self.attentions.append(o.detach().cpu()) )
 
-        # breakpoint()
         self.attentions = []
 
-    def get_attention(self, module, input, output):
-        self.attentions.append(output.cpu())
-
     def __call__(self, input_tensor):
+        # breakpoint()
         with torch.no_grad():
             output = self.model(input_tensor)
-        # breakpoint()
         return rollout(self.attentions, self.discard_ratio, self.head_fusion)
